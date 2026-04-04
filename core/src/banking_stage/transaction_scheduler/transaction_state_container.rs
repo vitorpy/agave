@@ -5,7 +5,6 @@ use {
     crate::banking_stage::scheduler_messages::TransactionId,
     agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     slab::{Slab, VacantEntry},
-    solana_packet::PACKET_DATA_SIZE,
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
     },
@@ -319,7 +318,11 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     fn with_capacity(capacity: usize) -> Self {
         let inner = TransactionStateContainer::with_capacity(capacity);
         let bytes_buffer = (0..inner.id_to_transaction_state.capacity())
-            .map(|_| Arc::new(Vec::with_capacity(PACKET_DATA_SIZE)))
+            .map(|_| {
+                Arc::new(Vec::with_capacity(
+                    agave_transaction_view::limits::MAX_TRANSACTION_SIZE,
+                ))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {

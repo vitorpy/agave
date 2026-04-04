@@ -45,7 +45,8 @@ const MIN_SIZED_PACKET_WITH_ATLS: usize = {
     + 1 // number of ATLS
 };
 
-/// The maximum number of ATLS that can fit in a valid packet.
+/// The maximum number of ATLS that can fit in a valid v0 packet (v0 wire limit
+/// remains `PACKET_DATA_SIZE`; SIMD-0296).
 const MAX_ATLS_PER_PACKET: u8 =
     ((PACKET_DATA_SIZE - MIN_SIZED_PACKET_WITH_ATLS) / MIN_SIZED_ATL) as u8;
 

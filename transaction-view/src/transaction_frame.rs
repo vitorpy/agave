@@ -1,8 +1,9 @@
 use {
     crate::{
         address_table_lookup_frame::{AddressTableLookupFrame, AddressTableLookupIterator},
-        bytes::advance_offset_for_type,
+        bytes::{advance_offset_for_type, read_byte},
         instructions_frame::{InstructionsFrame, InstructionsIterator},
+        limits::{MAX_LEGACY_OR_V0_TRANSACTION_SIZE, MAX_TRANSACTION_SIZE},
         message_header_frame::MessageHeaderFrame,
         result::{Result, TransactionViewError},
         signature_frame::SignatureFrame,
@@ -11,6 +12,7 @@ use {
         transaction_version::TransactionVersion,
     },
     solana_hash::Hash,
+    solana_message::v1,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
 };
@@ -36,43 +38,121 @@ pub(crate) struct TransactionFrame {
 impl TransactionFrame {
     /// Parse a serialized transaction and verify basic structure.
     /// The `bytes` parameter must have no trailing data.
-    pub(crate) fn try_new(bytes: &[u8]) -> Result<Self> {
-        let mut offset = 0;
-        let signature = SignatureFrame::try_new(bytes, &mut offset)?;
-        let message_header = MessageHeaderFrame::try_new(bytes, &mut offset)?;
-        let static_account_keys = StaticAccountKeysFrame::try_new(bytes, &mut offset)?;
-
-        // The recent blockhash is the first account key after the static
-        // account keys. The recent blockhash is always present in a valid
-        // transaction and has a fixed size of 32 bytes.
-        let recent_blockhash_offset = offset as u16;
-        advance_offset_for_type::<Hash>(bytes, &mut offset)?;
-
-        let instructions = InstructionsFrame::try_new(bytes, &mut offset)?;
-        let address_table_lookup = match message_header.version {
-            TransactionVersion::Legacy => AddressTableLookupFrame {
-                num_address_table_lookups: 0,
-                offset: 0,
-                total_writable_lookup_accounts: 0,
-                total_readonly_lookup_accounts: 0,
-            },
-            TransactionVersion::V0 => AddressTableLookupFrame::try_new(bytes, &mut offset)?,
-        };
-
-        // Verify that the entire transaction was parsed.
-        if offset != bytes.len() {
+    ///
+    /// Returns optional decoded tx-v1 message when the wire format is SIMD-0385 v1.
+    pub(crate) fn try_new(bytes: &[u8]) -> Result<(Self, Option<v1::Message>)> {
+        if bytes.len() > MAX_TRANSACTION_SIZE {
             return Err(TransactionViewError::ParseError);
         }
 
-        Ok(Self {
-            signature,
+        let mut offset = 0;
+        let signature = SignatureFrame::try_new(bytes, &mut offset)?;
+
+        let message_start = offset;
+        let message_prefix = read_byte(bytes, &mut offset)?;
+
+        let (
             message_header,
             static_account_keys,
             recent_blockhash_offset,
             instructions,
             address_table_lookup,
-            transaction_config_frame: TransactionConfigFrame::not_applicable(),
-        })
+            v1_message,
+        ) = if message_prefix == v1::V1_PREFIX {
+            let body_start = offset;
+            let (v1_msg, consumed) = v1::deserialize(&bytes[body_start..])
+                .map_err(|_| TransactionViewError::ParseError)?;
+            let Some(end) = body_start.checked_add(consumed) else {
+                return Err(TransactionViewError::ParseError);
+            };
+            if end != bytes.len() {
+                return Err(TransactionViewError::ParseError);
+            }
+
+            let message_header = MessageHeaderFrame {
+                offset: u16::try_from(message_start).map_err(|_| TransactionViewError::ParseError)?,
+                version: TransactionVersion::V1,
+                num_required_signatures: v1_msg.header.num_required_signatures,
+                num_readonly_signed_accounts: v1_msg.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: v1_msg.header.num_readonly_unsigned_accounts,
+            };
+
+            let static_account_keys = StaticAccountKeysFrame::v1_placeholder(v1_msg.account_keys.len())?;
+            let instructions = InstructionsFrame::v1_placeholder(v1_msg.instructions.len())?;
+            let address_table_lookup = AddressTableLookupFrame {
+                num_address_table_lookups: 0,
+                offset: 0,
+                total_writable_lookup_accounts: 0,
+                total_readonly_lookup_accounts: 0,
+            };
+
+            (
+                message_header,
+                static_account_keys,
+                0u16,
+                instructions,
+                address_table_lookup,
+                Some(v1_msg),
+            )
+        } else {
+            offset = message_start;
+            let message_header = MessageHeaderFrame::try_new(bytes, &mut offset)?;
+            let static_account_keys = StaticAccountKeysFrame::try_new(bytes, &mut offset)?;
+
+            // The recent blockhash is the first account key after the static
+            // account keys. The recent blockhash is always present in a valid
+            // transaction and has a fixed size of 32 bytes.
+            let recent_blockhash_offset = offset as u16;
+            advance_offset_for_type::<Hash>(bytes, &mut offset)?;
+
+            let instructions = InstructionsFrame::try_new(bytes, &mut offset)?;
+            let address_table_lookup = match message_header.version {
+                TransactionVersion::Legacy => AddressTableLookupFrame {
+                    num_address_table_lookups: 0,
+                    offset: 0,
+                    total_writable_lookup_accounts: 0,
+                    total_readonly_lookup_accounts: 0,
+                },
+                TransactionVersion::V0 => AddressTableLookupFrame::try_new(bytes, &mut offset)?,
+                TransactionVersion::V1 => return Err(TransactionViewError::ParseError),
+            };
+
+            // Verify that the entire transaction was parsed.
+            if offset != bytes.len() {
+                return Err(TransactionViewError::ParseError);
+            }
+
+            (
+                message_header,
+                static_account_keys,
+                recent_blockhash_offset,
+                instructions,
+                address_table_lookup,
+                None,
+            )
+        };
+
+        match message_header.version {
+            TransactionVersion::Legacy | TransactionVersion::V0 => {
+                if bytes.len() > MAX_LEGACY_OR_V0_TRANSACTION_SIZE {
+                    return Err(TransactionViewError::ParseError);
+                }
+            }
+            TransactionVersion::V1 => {}
+        }
+
+        Ok((
+            Self {
+                signature,
+                message_header,
+                static_account_keys,
+                recent_blockhash_offset,
+                instructions,
+                address_table_lookup,
+                transaction_config_frame: TransactionConfigFrame::not_applicable(),
+            },
+            v1_message,
+        ))
     }
 
     /// Return the number of signatures in the transaction.
@@ -290,7 +370,7 @@ mod tests {
 
     fn verify_transaction_view_frame(tx: &VersionedTransaction) {
         let bytes = bincode::serialize(tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         assert_eq!(frame.signature.num_signatures, tx.signatures.len() as u8);
         assert_eq!(frame.signature.offset as usize, 1);
@@ -461,6 +541,12 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_buffer_larger_than_v1_wire_limit() {
+        assert!(TransactionFrame::try_new(&vec![0u8; crate::limits::MAX_TRANSACTION_SIZE + 1])
+            .is_err());
+    }
+
+    #[test]
     fn test_trailing_byte() {
         let tx = simple_transfer();
         let mut bytes = bincode::serialize(&tx).unwrap();
@@ -542,7 +628,7 @@ mod tests {
     fn test_basic_accessors() {
         let tx = simple_transfer();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         assert_eq!(frame.num_signatures(), 1);
         assert!(matches!(frame.version(), TransactionVersion::Legacy));
@@ -570,7 +656,7 @@ mod tests {
     fn test_instructions_iter_empty() {
         let tx = minimally_sized_transaction();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         // SAFETY: `bytes` is the same slice used to create `frame`.
         unsafe {
@@ -583,7 +669,7 @@ mod tests {
     fn test_instructions_iter_single() {
         let tx = simple_transfer();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         // SAFETY: `bytes` is the same slice used to create `frame`.
         unsafe {
@@ -603,7 +689,7 @@ mod tests {
     fn test_instructions_iter_multiple() {
         let tx = multiple_transfers();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         // SAFETY: `bytes` is the same slice used to create `frame`.
         unsafe {
@@ -630,7 +716,7 @@ mod tests {
     fn test_address_table_lookup_iter_empty() {
         let tx = simple_transfer();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         // SAFETY: `bytes` is the same slice used to create `frame`.
         unsafe {
@@ -643,7 +729,7 @@ mod tests {
     fn test_address_table_lookup_iter_single() {
         let tx = v0_with_single_lookup();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         let atls_actual = tx.message.address_table_lookups().unwrap();
         // SAFETY: `bytes` is the same slice used to create `frame`.
@@ -661,7 +747,7 @@ mod tests {
     fn test_address_table_lookup_iter_multiple() {
         let tx = v0_with_multiple_lookups();
         let bytes = bincode::serialize(&tx).unwrap();
-        let frame = TransactionFrame::try_new(&bytes).unwrap();
+        let (frame, _) = TransactionFrame::try_new(&bytes).unwrap();
 
         let atls_actual = tx.message.address_table_lookups().unwrap();
         // SAFETY: `bytes` is the same slice used to create `frame`.

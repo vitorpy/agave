@@ -9612,9 +9612,9 @@ dependencies = [
  "solana-connection-cache",
  "solana-keypair",
  "solana-measure",
+ "solana-message",
  "solana-metrics",
  "solana-net-utils",
- "solana-packet 4.1.0",
  "solana-perf",
  "solana-pubkey 4.1.0",
  "solana-quic-client",
@@ -9797,6 +9797,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util 0.7.18",
+ "wincode",
 ]
 
 [[package]]
@@ -10554,6 +10555,7 @@ dependencies = [
  "rustls",
  "smallvec",
  "solana-keypair",
+ "solana-message",
  "solana-metrics",
  "solana-net-utils",
  "solana-packet 4.1.0",

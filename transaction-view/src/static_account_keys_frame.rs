@@ -3,12 +3,13 @@ use {
         bytes::{advance_offset_for_array, read_byte},
         result::{Result, TransactionViewError},
     },
+    solana_message::v1::MAX_ADDRESSES,
     solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
 };
 
-// The packet has a maximum length of 1232 bytes.
-// This means the maximum number of 32 byte keys is 38.
+// Legacy and v0 transactions are capped at `PACKET_DATA_SIZE` bytes, so at most
+// 38 pubkeys could fit if the rest of the message were empty.
 // 38 as an min-sized encoded u16 is 1 byte.
 // We can simply read this byte, if it's >38 we can return None.
 pub const MAX_STATIC_ACCOUNTS_PER_PACKET: u8 =
@@ -24,6 +25,19 @@ pub(crate) struct StaticAccountKeysFrame {
 }
 
 impl StaticAccountKeysFrame {
+    /// Placeholder frame for tx-v1: account keys live in the decoded [`solana_message::v1::Message`].
+    #[inline(always)]
+    pub(crate) fn v1_placeholder(num_accounts: usize) -> Result<Self> {
+        let num_static_accounts = u8::try_from(num_accounts).map_err(|_| TransactionViewError::ParseError)?;
+        if num_static_accounts == 0 || num_static_accounts > MAX_ADDRESSES {
+            return Err(TransactionViewError::ParseError);
+        }
+        Ok(Self {
+            num_static_accounts,
+            offset: 0,
+        })
+    }
+
     #[inline(always)]
     pub(crate) fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
         // Max size must not have the MSB set so that it is size 1.

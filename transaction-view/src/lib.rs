@@ -5,7 +5,10 @@ pub mod bytes;
 #[cfg(not(feature = "dev-context-only-utils"))]
 mod bytes;
 
+pub mod limits;
+
 mod address_table_lookup_frame;
+mod instruction_iterator;
 mod instructions_frame;
 mod message_header_frame;
 pub mod resolved_transaction_view;

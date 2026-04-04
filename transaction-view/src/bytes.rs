@@ -88,12 +88,11 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Result<u16> {
 /// Domain-specific optimization for reading a compressed u16.
 ///
 /// The compressed u16's are only used for array-lengths in our transaction
-/// format. The transaction packet has a maximum size of 1232 bytes.
-/// This means that the maximum array length within a **valid** transaction is
-/// 1232. This has a minimally encoded length of 2 bytes.
-/// Although the encoding scheme allows for more, any arrays with this length
-/// would be too large to fit in a packet. This function optimizes for this
-/// case, and reads a maximum of 2 bytes.
+/// format. Serialized v1 transactions may be up to
+/// `crate::limits::MAX_TRANSACTION_SIZE` bytes; legacy and v0 remain capped at
+/// `crate::limits::MAX_LEGACY_OR_V0_TRANSACTION_SIZE`. Lengths that fit in two
+/// bytes of short-u16 encoding (including all values up to the v1 wire limit)
+/// are handled here without a third continuation byte.
 /// If the buffer is too short or the encoding is invalid, return Err.
 /// `offset` is updated to point to the byte after the compressed u16.
 ///
@@ -251,8 +250,8 @@ pub unsafe fn unchecked_copy_value<T: Sized>(bytes: &[u8], offset: usize) -> T {
 mod tests {
     use {
         super::*,
+        crate::limits::MAX_TRANSACTION_SIZE,
         bincode::{DefaultOptions, Options, serialize_into},
-        solana_packet::PACKET_DATA_SIZE,
         solana_short_vec::ShortU16,
     };
 
@@ -345,8 +344,10 @@ mod tests {
         let mut buffer = [0u8; 1024];
         let options = DefaultOptions::new().with_fixint_encoding(); // Ensure fixed-int encoding
 
-        // Test all possible u16 values under the packet length
-        for value in 0..=PACKET_DATA_SIZE as u16 {
+        const _: () = assert!(MAX_TRANSACTION_SIZE <= u16::MAX as usize);
+
+        // Test all ShortU16 lengths that can appear in a valid v1-sized wire format.
+        for value in 0..=(MAX_TRANSACTION_SIZE as u16) {
             let mut offset;
             let short_u16 = ShortU16(value);
 

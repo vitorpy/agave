@@ -23,7 +23,7 @@ dev-context-only-utils = ["solana-compute-budget-instruction/dev-context-only-ut
 [dependencies]
 agave-transaction-view = { workspace = true }
 solana-compute-budget-instruction = { workspace = true }
-solana-hash = { workspace = true }
+solana-hash = { workspace = true, features = ["atomic"] }
 solana-message = { workspace = true, features = ["blake3", "wincode"] }
 solana-pubkey = { workspace = true }
 solana-sdk-ids = { workspace = true }
@@ -48,8 +48,8 @@ solana-runtime-transaction = { path = ".", features = ["agave-unstable-api"] }
 solana-signer = { workspace = true }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-system-transaction = { workspace = true }
-solana-transaction = { workspace = true, features = ["blake3"] }
-solana-vote-interface = { workspace = true }
+solana-transaction = { workspace = true, features = ["blake3", "serde"] }
+solana-vote-interface = { workspace = true, features = ["bincode"] }
 
 [[bench]]
 name = "get_signature_details"

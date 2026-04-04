@@ -9,7 +9,7 @@ use {
     },
     agave_snapshots::{paths as snapshot_paths, snapshot_config::SnapshotConfig},
     base64::{Engine, prelude::BASE64_STANDARD},
-    bincode::{config::Options, serialize},
+    bincode::serialize,
     crossbeam_channel::{Receiver, Sender, unbounded},
     jsonrpc_core::{
         BoxFuture, Error, Metadata, Result,
@@ -44,9 +44,8 @@ use {
         blockstore_meta::PerfSample,
         leader_schedule_cache::LeaderScheduleCache,
     },
-    solana_message::{AddressLoader, SanitizedMessage},
+    solana_message::{AddressLoader, SanitizedMessage, VersionedMessage},
     solana_metrics::inc_new_counter_info,
-    solana_perf::packet::PACKET_DATA_SIZE,
     solana_program_pack::Pack,
     solana_pubkey::{PUBKEY_BYTES, Pubkey},
     solana_rpc_client_api::{
@@ -114,10 +113,13 @@ use {
         time::Duration,
     },
     tokio::runtime::Runtime,
+    wincode,
 };
 #[cfg(test)]
 use {
+    bincode::Options,
     solana_gossip::contact_info::ContactInfo,
+    solana_perf::packet::PACKET_DATA_SIZE,
     solana_ledger::get_tmp_ledger_path,
     solana_net_utils::SocketAddrSpace,
     solana_program_runtime::solana_sbpf::program::BuiltinFunctionDefinition,
@@ -3487,7 +3489,7 @@ pub mod rpc_accounts_scan {
 pub mod rpc_full {
     use {
         super::*,
-        solana_message::{SanitizedVersionedMessage, VersionedMessage},
+        solana_message::SanitizedVersionedMessage,
         solana_transaction_status::{UiLoadedAddresses, parse_ui_inner_instructions},
     };
     #[rpc]
@@ -3857,7 +3859,7 @@ pub mod rpc_full {
                 ))
             })?;
             let (wire_transaction, unsanitized_tx) =
-                decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
+                decode_and_deserialize_versioned_transaction(data, binary_encoding)?;
 
             let preflight_commitment = if skip_preflight {
                 Some(CommitmentConfig::processed())
@@ -4008,7 +4010,7 @@ pub mod rpc_full {
                 ))
             })?;
             let (_, mut unsanitized_tx) =
-                decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
+                decode_and_deserialize_versioned_transaction(data, binary_encoding)?;
 
             let bank = &*meta.get_bank_with_config(RpcContextConfig {
                 commitment,
@@ -4302,10 +4304,8 @@ pub mod rpc_full {
             config: Option<RpcContextConfig>,
         ) -> Result<RpcResponse<Option<u64>>> {
             debug!("get_fee_for_message rpc request received");
-            let (_, message) = decode_and_deserialize::<VersionedMessage>(
-                data,
-                TransactionBinaryEncoding::Base64,
-            )?;
+            let (_, message) =
+                decode_and_deserialize_versioned_message(data, TransactionBinaryEncoding::Base64)?;
             let bank = &*meta.get_bank_with_config(config.unwrap_or_default())?;
             let sanitized_versioned_message = SanitizedVersionedMessage::try_from(message)
                 .map_err(|err| {
@@ -4364,25 +4364,27 @@ fn rpc_perf_sample_from_perf_sample(slot: u64, sample: PerfSample) -> RpcPerfSam
     }
 }
 
-const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
-const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
-fn decode_and_deserialize<T>(
+/// Versioned transactions/messages may use up to SIMD-0296 / v1 max wire size (wincode wire on RPC).
+const MAX_VERSIONED_WIRE_BYTES: usize = solana_message::v1::MAX_TRANSACTION_SIZE;
+const MAX_VERSIONED_BASE58_CHARS: usize =
+    (MAX_VERSIONED_WIRE_BYTES.saturating_mul(1683) + 1232 - 1) / 1232;
+const MAX_VERSIONED_BASE64_CHARS: usize = 4 * ((MAX_VERSIONED_WIRE_BYTES + 2) / 3);
+
+fn decode_wire_bytes(
     encoded: String,
     encoding: TransactionBinaryEncoding,
-) -> Result<(Vec<u8>, T)>
-where
-    T: serde::de::DeserializeOwned,
-{
+    type_name_str: &'static str,
+    max_raw: usize,
+    max_b58: usize,
+    max_b64: usize,
+) -> Result<Vec<u8>> {
     let wire_output = match encoding {
         TransactionBinaryEncoding::Base58 => {
             inc_new_counter_info!("rpc-base58_encoded_tx", 1);
-            if encoded.len() > MAX_BASE58_SIZE {
+            if encoded.len() > max_b58 {
                 return Err(Error::invalid_params(format!(
-                    "base58 encoded {} too large: {} bytes (max: encoded/raw {}/{})",
-                    type_name::<T>(),
+                    "base58 encoded {type_name_str} too large: {} bytes (max: encoded/raw {max_b58}/{max_raw})",
                     encoded.len(),
-                    MAX_BASE58_SIZE,
-                    PACKET_DATA_SIZE,
                 )));
             }
             bs58::decode(encoded)
@@ -4391,13 +4393,10 @@ where
         }
         TransactionBinaryEncoding::Base64 => {
             inc_new_counter_info!("rpc-base64_encoded_tx", 1);
-            if encoded.len() > MAX_BASE64_SIZE {
+            if encoded.len() > max_b64 {
                 return Err(Error::invalid_params(format!(
-                    "base64 encoded {} too large: {} bytes (max: encoded/raw {}/{})",
-                    type_name::<T>(),
+                    "base64 encoded {type_name_str} too large: {} bytes (max: encoded/raw {max_b64}/{max_raw})",
                     encoded.len(),
-                    MAX_BASE64_SIZE,
-                    PACKET_DATA_SIZE,
                 )));
             }
             BASE64_STANDARD
@@ -4405,14 +4404,87 @@ where
                 .map_err(|e| Error::invalid_params(format!("invalid base64 encoding: {e:?}")))?
         }
     };
-    if wire_output.len() > PACKET_DATA_SIZE {
+    if wire_output.len() > max_raw {
         return Err(Error::invalid_params(format!(
-            "decoded {} too large: {} bytes (max: {} bytes)",
-            type_name::<T>(),
+            "decoded {type_name_str} too large: {} bytes (max: {max_raw} bytes)",
             wire_output.len(),
-            PACKET_DATA_SIZE
         )));
     }
+    Ok(wire_output)
+}
+
+fn deserialize_versioned_transaction(wire: &[u8]) -> Result<VersionedTransaction> {
+    wincode::deserialize(wire).map_err(|err| {
+        Error::invalid_params(format!(
+            "failed to deserialize {}: {err}",
+            type_name::<VersionedTransaction>(),
+        ))
+    })
+}
+
+fn deserialize_versioned_message(wire: &[u8]) -> Result<VersionedMessage> {
+    wincode::deserialize(wire).map_err(|err| {
+        Error::invalid_params(format!(
+            "failed to deserialize {}: {err}",
+            type_name::<VersionedMessage>(),
+        ))
+    })
+}
+
+fn decode_and_deserialize_versioned_transaction(
+    encoded: String,
+    encoding: TransactionBinaryEncoding,
+) -> Result<(Vec<u8>, VersionedTransaction)> {
+    let wire_output = decode_wire_bytes(
+        encoded,
+        encoding,
+        type_name::<VersionedTransaction>(),
+        MAX_VERSIONED_WIRE_BYTES,
+        MAX_VERSIONED_BASE58_CHARS,
+        MAX_VERSIONED_BASE64_CHARS,
+    )?;
+    deserialize_versioned_transaction(&wire_output).map(|tx| (wire_output, tx))
+}
+
+fn decode_and_deserialize_versioned_message(
+    encoded: String,
+    encoding: TransactionBinaryEncoding,
+) -> Result<(Vec<u8>, VersionedMessage)> {
+    let wire_output = decode_wire_bytes(
+        encoded,
+        encoding,
+        type_name::<VersionedMessage>(),
+        MAX_VERSIONED_WIRE_BYTES,
+        MAX_VERSIONED_BASE58_CHARS,
+        MAX_VERSIONED_BASE64_CHARS,
+    )?;
+    deserialize_versioned_message(&wire_output).map(|msg| (wire_output, msg))
+}
+
+#[cfg(test)]
+/// Legacy `Transaction` wire format remains capped at one legacy packet.
+const MAX_LEGACY_WIRE_BYTES: usize = PACKET_DATA_SIZE;
+#[cfg(test)]
+const MAX_LEGACY_BASE58_CHARS: usize = 1683; // Golden for PACKET_DATA_SIZE
+#[cfg(test)]
+const MAX_LEGACY_BASE64_CHARS: usize = 1644; // Golden for PACKET_DATA_SIZE
+
+#[cfg(test)]
+fn decode_and_deserialize<T>(
+    encoded: String,
+    encoding: TransactionBinaryEncoding,
+) -> Result<(Vec<u8>, T)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let wire_output = decode_wire_bytes(
+        encoded,
+        encoding,
+        type_name::<T>(),
+        MAX_LEGACY_WIRE_BYTES,
+        MAX_LEGACY_BASE58_CHARS,
+        MAX_LEGACY_BASE64_CHARS,
+    )?;
     bincode::options()
         .with_limit(PACKET_DATA_SIZE as u64)
         .with_fixint_encoding()
@@ -4604,7 +4676,9 @@ pub mod tests {
         solana_system_transaction as system_transaction,
         solana_sysvar::slot_hashes::SlotHashes,
         solana_time_utils::slot_duration_from_slots_per_year,
-        solana_transaction::{Transaction, versioned::TransactionVersion},
+        solana_transaction::{
+            Transaction, versioned::TransactionVersion, versioned::VersionedTransaction,
+        },
         solana_transaction_error::TransactionError,
         solana_transaction_status::{
             EncodedConfirmedBlock, EncodedTransaction, EncodedTransactionWithStatusMeta,
@@ -9109,12 +9183,26 @@ pub mod tests {
     }
 
     #[test]
-    fn test_worst_case_encoded_tx_goldens() {
+    fn test_worst_case_legacy_encoded_tx_goldens() {
         let ff_tx = vec![0xffu8; PACKET_DATA_SIZE];
         let tx58 = bs58::encode(&ff_tx).into_string();
-        assert_eq!(tx58.len(), MAX_BASE58_SIZE);
+        assert_eq!(tx58.len(), MAX_LEGACY_BASE58_CHARS);
         let tx64 = BASE64_STANDARD.encode(&ff_tx);
-        assert_eq!(tx64.len(), MAX_BASE64_SIZE);
+        assert_eq!(tx64.len(), MAX_LEGACY_BASE64_CHARS);
+    }
+
+    #[test]
+    fn test_worst_case_versioned_encoded_tx_goldens() {
+        let ff_tx = vec![0xffu8; MAX_VERSIONED_WIRE_BYTES];
+        let tx58 = bs58::encode(&ff_tx).into_string();
+        assert!(
+            tx58.len() <= MAX_VERSIONED_BASE58_CHARS,
+            "base58 cap {} must fit worst-case test vector (len {})",
+            MAX_VERSIONED_BASE58_CHARS,
+            tx58.len(),
+        );
+        let tx64 = BASE64_STANDARD.encode(&ff_tx);
+        assert_eq!(tx64.len(), MAX_VERSIONED_BASE64_CHARS);
     }
 
     #[test]
@@ -9130,7 +9218,7 @@ pub mod tests {
                 .unwrap_err(),
             Error::invalid_params(format!(
                 "base58 encoded solana_transaction::Transaction too large: {tx58_len} bytes (max: \
-                 encoded/raw {MAX_BASE58_SIZE}/{PACKET_DATA_SIZE})",
+                 encoded/raw {MAX_LEGACY_BASE58_CHARS}/{PACKET_DATA_SIZE})",
             ))
         );
 
@@ -9141,7 +9229,7 @@ pub mod tests {
                 .unwrap_err(),
             Error::invalid_params(format!(
                 "base64 encoded solana_transaction::Transaction too large: {tx64_len} bytes (max: \
-                 encoded/raw {MAX_BASE64_SIZE}/{PACKET_DATA_SIZE})",
+                 encoded/raw {MAX_LEGACY_BASE64_CHARS}/{PACKET_DATA_SIZE})",
             ))
         );
 
@@ -9209,6 +9297,50 @@ pub mod tests {
     }
 
     #[test]
+    fn test_decode_versioned_transaction_too_large_payloads_fail() {
+        let vn = std::any::type_name::<VersionedTransaction>();
+
+        // Worst-case base58 grows with raw length; +2 is enough to exceed the bound (like legacy).
+        let too_big58 = MAX_VERSIONED_WIRE_BYTES + 2;
+        let tx_ser58 = vec![0xffu8; too_big58];
+        let tx58 = bs58::encode(&tx_ser58).into_string();
+        let tx58_len = tx58.len();
+        assert_eq!(
+            decode_and_deserialize_versioned_transaction(tx58, TransactionBinaryEncoding::Base58)
+                .unwrap_err(),
+            Error::invalid_params(format!(
+                "base58 encoded {vn} too large: {tx58_len} bytes (max: encoded/raw \
+                 {MAX_VERSIONED_BASE58_CHARS}/{MAX_VERSIONED_WIRE_BYTES})",
+            ))
+        );
+
+        // Base64 length only bumps when `(n+2)/3` increases; 4097–4098 B still encode to 5464 chars.
+        let too_big64 = MAX_VERSIONED_WIRE_BYTES + 3;
+        let tx_ser64 = vec![0xffu8; too_big64];
+        let tx64 = BASE64_STANDARD.encode(&tx_ser64);
+        let tx64_len = tx64.len();
+        assert_eq!(
+            decode_and_deserialize_versioned_transaction(tx64, TransactionBinaryEncoding::Base64)
+                .unwrap_err(),
+            Error::invalid_params(format!(
+                "base64 encoded {vn} too large: {tx64_len} bytes (max: encoded/raw \
+                 {MAX_VERSIONED_BASE64_CHARS}/{MAX_VERSIONED_WIRE_BYTES})",
+            ))
+        );
+
+        let too_big = MAX_VERSIONED_WIRE_BYTES + 1;
+        let tx_ser = vec![0x00u8; too_big];
+        let tx58 = bs58::encode(&tx_ser).into_string();
+        assert_eq!(
+            decode_and_deserialize_versioned_transaction(tx58, TransactionBinaryEncoding::Base58)
+                .unwrap_err(),
+            Error::invalid_params(format!(
+                "decoded {vn} too large: {too_big} bytes (max: {MAX_VERSIONED_WIRE_BYTES} bytes)"
+            ))
+        );
+    }
+
+    #[test]
     fn test_sanitize_unsanitary() {
         let unsanitary_tx58 = "ju9xZWuDBX4pRxX2oZkTjxU5jB4SSTgEGhX8bQ8PURNzyzqKMPPpNvWihx8zUe\
              FfrbVNoAaEsNKZvGzAnTDy5bhNT9kt6KFCTBixpvrLCzg4M5UdFUQYrn1gdgjX\
@@ -9216,7 +9348,7 @@ pub mod tests {
              hD6onjM2M3qZW5C8J6d1pj41MxKmZgPBSha3MyKkNLkAGFASK"
             .to_string();
 
-        let unsanitary_versioned_tx = decode_and_deserialize::<VersionedTransaction>(
+        let unsanitary_versioned_tx = decode_and_deserialize_versioned_transaction(
             unsanitary_tx58,
             TransactionBinaryEncoding::Base58,
         )

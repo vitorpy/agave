@@ -4,9 +4,10 @@ use {
             advance_offset_for_array, check_remaining, optimized_read_compressed_u16, read_byte,
             unchecked_read_byte, unchecked_read_slice_data,
         },
-        result::Result,
+        result::{Result, TransactionViewError},
     },
     core::fmt::{Debug, Formatter},
+    solana_message::v1::MAX_INSTRUCTIONS,
     solana_svm_transaction::instruction::SVMInstruction,
 };
 
@@ -29,6 +30,20 @@ pub(crate) struct InstructionFrame {
 }
 
 impl InstructionsFrame {
+    /// Placeholder frame for tx-v1: instructions live in the decoded [`solana_message::v1::Message`].
+    #[inline(always)]
+    pub(crate) fn v1_placeholder(num_instructions: usize) -> Result<Self> {
+        let n = u16::try_from(num_instructions).map_err(|_| TransactionViewError::ParseError)?;
+        if usize::from(n) > MAX_INSTRUCTIONS as usize {
+            return Err(TransactionViewError::ParseError);
+        }
+        Ok(Self {
+            num_instructions: n,
+            offset: 0,
+            frames: Vec::new(),
+        })
+    }
+
     /// Get the number of instructions and offset to the first instruction.
     /// The offset will be updated to point to the first byte after the last
     /// instruction.

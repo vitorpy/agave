@@ -98,6 +98,35 @@ impl ComputeBudgetInstructionDetails {
         Ok(compute_budget_instruction_details)
     }
 
+    /// Apply tx-v1 inline configuration for compute-budget fields not already set by
+    /// compute-budget program instructions ([SIMD-0385]).
+    pub fn merge_v1_transaction_config(&mut self, config: &solana_message::v1::TransactionConfig) {
+        const SYNTH_IX: u8 = 0;
+        if self.requested_compute_unit_limit.is_none() {
+            if let Some(cu) = config.compute_unit_limit {
+                self.requested_compute_unit_limit = Some((SYNTH_IX, cu));
+            }
+        }
+        if self.requested_heap_size.is_none() {
+            if let Some(h) = config.heap_size {
+                self.requested_heap_size = Some((SYNTH_IX, h));
+            }
+        }
+        if self.requested_loaded_accounts_data_size_limit.is_none() {
+            if let Some(l) = config.loaded_accounts_data_size_limit {
+                self.requested_loaded_accounts_data_size_limit = Some((SYNTH_IX, l));
+            }
+        }
+        if self.requested_compute_unit_price.is_none() {
+            if let (Some(lamports), Some(cu)) = (config.priority_fee, config.compute_unit_limit) {
+                if lamports > 0 && cu > 0 {
+                    let micro = lamports.saturating_mul(1_000_000) / u64::from(cu);
+                    self.requested_compute_unit_price = Some((SYNTH_IX, micro));
+                }
+            }
+        }
+    }
+
     pub fn sanitize_and_convert_to_compute_budget_limits(
         &self,
         feature_set: &FeatureSet,

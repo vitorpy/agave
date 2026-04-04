@@ -123,7 +123,8 @@ use {
     solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{measure::Measure, measure_time, measure_us},
     solana_message::{
-        AccountKeys, SanitizedMessage, VersionedMessage, inner_instruction::InnerInstructions,
+        self, AccountKeys, SanitizedMessage, VersionedMessage,
+        inner_instruction::InnerInstructions,
     },
     solana_packet::PACKET_DATA_SIZE,
     solana_precompile_error::PrecompileError,
@@ -4999,11 +5000,6 @@ impl Bank {
         tx: VersionedTransaction,
         verification_mode: TransactionVerificationMode,
     ) -> Result<RuntimeTransaction<SanitizedTransaction>> {
-        // Discard v1 transactions until support is added.
-        if tx.version() == TransactionVersion::Number(1) {
-            return Err(TransactionError::UnsupportedVersion);
-        }
-
         let serialized_message = tx.message.serialize();
         self.verify_transaction_with_serialized_message(tx, &serialized_message, verification_mode)
     }
@@ -5020,18 +5016,22 @@ impl Bank {
         serialized_message: &[u8],
         verification_mode: TransactionVerificationMode,
     ) -> Result<RuntimeTransaction<SanitizedTransaction>> {
-        // Discard v1 transactions until support is added.
-        if tx.version() == TransactionVersion::Number(1) {
-            return Err(TransactionError::UnsupportedVersion);
-        }
-
         let enable_instruction_account_limit =
             self.feature_set.snapshot().limit_instruction_accounts;
 
         let sanitized_tx = {
             let size =
                 wincode::serialized_size(&tx).map_err(|_| TransactionError::SanitizeFailure)?;
-            if size > PACKET_DATA_SIZE as u64 {
+            let max_wire = match tx.version() {
+                TransactionVersion::LEGACY | TransactionVersion::Number(0) => {
+                    PACKET_DATA_SIZE as u64
+                }
+                TransactionVersion::Number(1) => solana_message::v1::MAX_TRANSACTION_SIZE as u64,
+                TransactionVersion::Number(_) => {
+                    return Err(TransactionError::UnsupportedVersion);
+                }
+            };
+            if size > max_wire {
                 return Err(TransactionError::SanitizeFailure);
             }
 

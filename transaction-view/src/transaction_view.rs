@@ -1,12 +1,17 @@
 use {
     crate::{
         address_table_lookup_frame::AddressTableLookupIterator,
-        instructions_frame::InstructionsIterator, result::Result, sanitize::sanitize,
-        transaction_config_frame::TransactionConfigView, transaction_data::TransactionData,
-        transaction_frame::TransactionFrame, transaction_version::TransactionVersion,
+        instruction_iterator::UnifiedInstructionsIter,
+        result::Result,
+        sanitize::sanitize,
+        transaction_config_frame::TransactionConfigView,
+        transaction_data::TransactionData,
+        transaction_frame::TransactionFrame,
+        transaction_version::TransactionVersion,
     },
     core::fmt::{Debug, Formatter},
     solana_hash::Hash,
+    solana_message::v1,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_svm_transaction::{
@@ -29,13 +34,28 @@ pub type SanitizedTransactionView<D> = TransactionView<true, D>;
 pub struct TransactionView<const SANITIZED: bool, D: TransactionData> {
     data: D,
     frame: TransactionFrame,
+    /// Decoded tx-v1 message (SIMD-0385). `None` for legacy and v0.
+    v1_message: Option<v1::Message>,
+    /// `Pubkey` view of v1 account keys (same order as `v1_message`).
+    v1_static_pubkeys: Option<Vec<Pubkey>>,
 }
 
 impl<D: TransactionData> TransactionView<false, D> {
     /// Creates a new `TransactionView` without running sanitization checks.
     pub fn try_new_unsanitized(data: D) -> Result<Self> {
-        let frame = TransactionFrame::try_new(data.data())?;
-        Ok(Self { data, frame })
+        let (frame, v1_message) = TransactionFrame::try_new(data.data())?;
+        let v1_static_pubkeys = v1_message.as_ref().map(|m| {
+            m.account_keys
+                .iter()
+                .map(|a| Pubkey::new_from_array(a.to_bytes()))
+                .collect()
+        });
+        Ok(Self {
+            data,
+            frame,
+            v1_message,
+            v1_static_pubkeys,
+        })
     }
 
     /// Sanitizes the transaction view, returning a sanitized view on success.
@@ -47,6 +67,8 @@ impl<D: TransactionData> TransactionView<false, D> {
         Ok(SanitizedTransactionView {
             data: self.data,
             frame: self.frame,
+            v1_message: self.v1_message,
+            v1_static_pubkeys: self.v1_static_pubkeys,
         })
     }
 }
@@ -60,6 +82,12 @@ impl<D: TransactionData> TransactionView<true, D> {
 }
 
 impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
+    /// Raw decoded tx-v1 message when this view is [`TransactionVersion::V1`].
+    #[inline]
+    pub fn v1_message(&self) -> Option<&v1::Message> {
+        self.v1_message.as_ref()
+    }
+
     /// Return the number of signatures in the transaction.
     #[inline]
     pub fn num_signatures(&self) -> u8 {
@@ -131,6 +159,9 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
     /// Return the slice of static account keys in the transaction.
     #[inline]
     pub fn static_account_keys(&self) -> &[Pubkey] {
+        if let Some(keys) = self.v1_static_pubkeys.as_ref() {
+            return keys.as_slice();
+        }
         let data = self.data();
         // SAFETY: `frame` was created from `data`.
         unsafe { self.frame.static_account_keys(data) }
@@ -139,6 +170,9 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
     /// Return the recent blockhash in the transaction.
     #[inline]
     pub fn recent_blockhash(&self) -> &Hash {
+        if let Some(msg) = self.v1_message.as_ref() {
+            return &msg.lifetime_specifier;
+        }
         let data = self.data();
         // SAFETY: `frame` was created from `data`.
         unsafe { self.frame.recent_blockhash(data) }
@@ -146,10 +180,13 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
 
     /// Return an iterator over the instructions in the transaction.
     #[inline]
-    pub fn instructions_iter(&self) -> InstructionsIterator<'_> {
+    pub fn instructions_iter(&self) -> UnifiedInstructionsIter<'_> {
+        if let Some(msg) = self.v1_message.as_ref() {
+            return UnifiedInstructionsIter::V1 { message: msg, index: 0 };
+        }
         let data = self.data();
         // SAFETY: `frame` was created from `data`.
-        unsafe { self.frame.instructions_iter(data) }
+        UnifiedInstructionsIter::Wire(unsafe { self.frame.instructions_iter(data) })
     }
 
     /// Return an iterator over the address table lookups in the transaction.

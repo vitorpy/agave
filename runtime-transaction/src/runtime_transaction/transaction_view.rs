@@ -87,8 +87,11 @@ where
         precompile_signature_details.num_ed25519_instruction_signatures,
         precompile_signature_details.num_secp256r1_instruction_signatures,
     );
-    let compute_budget_instruction_details =
+    let mut compute_budget_instruction_details =
         ComputeBudgetInstructionDetails::try_from(transaction.program_instructions_iter())?;
+    if let Some(msg) = transaction.v1_message() {
+        compute_budget_instruction_details.merge_v1_transaction_config(&msg.config);
+    }
 
     Ok(TransactionMeta {
         message_hash,
@@ -208,6 +211,11 @@ impl<D: TransactionData> TransactionWithMeta for RuntimeTransaction<ResolvedTran
                     })
                     .collect(),
             }),
+            TransactionVersion::V1 => VersionedMessage::V1(
+                self.v1_message()
+                    .cloned()
+                    .expect("V1 transaction view must retain decoded message"),
+            ),
         };
 
         VersionedTransaction {

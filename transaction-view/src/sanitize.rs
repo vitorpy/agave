@@ -8,6 +8,11 @@ pub(crate) fn sanitize(
     view: &UnsanitizedTransactionView<impl TransactionData>,
     enable_instruction_accounts_limit: bool,
 ) -> Result<()> {
+    if let Some(msg) = view.v1_message() {
+        msg.validate()
+            .map_err(|_| crate::result::TransactionViewError::SanitizeError)?;
+    }
+
     sanitize_signatures(view)?;
     sanitize_account_access(view)?;
     sanitize_instructions(view, enable_instruction_accounts_limit)?;

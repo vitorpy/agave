@@ -1,8 +1,10 @@
 use {
-    agave_transaction_view::bytes::{optimized_read_compressed_u16, read_compressed_u16},
+    agave_transaction_view::{
+        bytes::{optimized_read_compressed_u16, read_compressed_u16},
+        limits::MAX_TRANSACTION_SIZE,
+    },
     bincode::{DefaultOptions, Options, serialize_into},
     criterion::{Criterion, Throughput, criterion_group, criterion_main},
-    solana_packet::PACKET_DATA_SIZE,
     solana_short_vec::{ShortU16, decode_shortu16_len},
     std::hint::black_box,
 };
@@ -11,8 +13,8 @@ fn setup() -> Vec<(u16, usize, Vec<u8>)> {
     let options = DefaultOptions::new().with_fixint_encoding(); // Ensure fixed-int encoding
 
     // Create a vector of all valid u16 values serialized into 16-byte buffers.
-    let mut values = Vec::with_capacity(PACKET_DATA_SIZE);
-    for value in 0..PACKET_DATA_SIZE as u16 {
+    let mut values = Vec::with_capacity(MAX_TRANSACTION_SIZE);
+    for value in 0..MAX_TRANSACTION_SIZE as u16 {
         let short_u16 = ShortU16(value);
         let mut buffer = vec![0u8; 16];
         let serialized_len = options

@@ -17,7 +17,8 @@ use {
     smallvec::SmallVec,
     solana_keypair::Keypair,
     solana_net_utils::token_bucket::TokenBucket,
-    solana_packet::{Meta, PACKET_DATA_SIZE},
+    solana_message::v1::MAX_TRANSACTION_SIZE,
+    solana_packet::Meta,
     solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
     solana_tls_utils::get_pubkey_from_tls_certificate,
@@ -725,8 +726,8 @@ fn handle_chunks(
     let n_chunks = chunks.len();
     for chunk in chunks {
         accum.meta.size += chunk.len();
-        if accum.meta.size > PACKET_DATA_SIZE {
-            // The stream window size is set to PACKET_DATA_SIZE, so one individual chunk can
+        if accum.meta.size > MAX_TRANSACTION_SIZE {
+            // The stream window size is set to MAX_TRANSACTION_SIZE, so one individual chunk can
             // never exceed this size. A peer can send two chunks that together exceed the size
             // tho, in which case we report the error.
             stats.invalid_stream_size.fetch_add(1, Ordering::Relaxed);
@@ -1164,7 +1165,7 @@ pub mod test {
             // Send enough data to create more than 1 chunks.
             // The first will try to open the connection (which should fail).
             // The following chunks will enable the detection of connection failure.
-            let data = vec![1u8; PACKET_DATA_SIZE * 2];
+            let data = vec![1u8; MAX_TRANSACTION_SIZE * 2];
             s2.write_all(&data)
                 .await
                 .expect_err("shouldn't be able to open 2 connections");
@@ -1184,7 +1185,7 @@ pub mod test {
         let conn1 = Arc::new(make_client_endpoint(&server_address, client_keypair).await);
 
         // Send a full size packet with single byte writes.
-        let num_bytes = PACKET_DATA_SIZE;
+        let num_bytes = MAX_TRANSACTION_SIZE;
         let num_expected_packets = 1;
         let mut s1 = conn1.open_uni().await.unwrap();
         for _ in 0..num_bytes {
@@ -1204,7 +1205,7 @@ pub mod test {
         let conn1 = Arc::new(make_client_endpoint(&server_address, client_keypair).await);
 
         // Send a full size packet with single byte writes.
-        let num_bytes = PACKET_DATA_SIZE;
+        let num_bytes = MAX_TRANSACTION_SIZE;
         let packet = vec![1u8; num_bytes];
         for _ in 0..num_expected_packets {
             let mut s1 = conn1.open_uni().await.unwrap();
@@ -1249,7 +1250,7 @@ pub mod test {
 
         // Send a full size packet with single byte writes.
         if let Ok(mut s1) = conn1.open_uni().await {
-            for _ in 0..PACKET_DATA_SIZE {
+            for _ in 0..MAX_TRANSACTION_SIZE {
                 // Ignoring any errors here. s1.finish() will test the error condition
                 s1.write_all(&[0u8]).await.unwrap_or_default();
             }
@@ -2057,7 +2058,7 @@ pub mod test {
 
         let mut send_stream = client_connection.open_uni().await.unwrap();
         send_stream
-            .write_all(&[42; PACKET_DATA_SIZE + 1])
+            .write_all(&[42; MAX_TRANSACTION_SIZE + 1])
             .await
             .unwrap();
         match client_connection.closed().await {

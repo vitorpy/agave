@@ -8,10 +8,9 @@ use {
     solana_signature::Signature,
 };
 
-// The packet has a maximum length of 1232 bytes.
-// Each signature must be paired with a unique static pubkey, so each
-// signature really requires 96 bytes. This means the maximum number of
-// signatures in a **valid** transaction packet is 12.
+// Legacy/v0 wire format is capped at `PACKET_DATA_SIZE` bytes; v1 allows larger
+// wires but caps signatures at 12 (`solana_message::v1::MAX_SIGNATURES`).
+// Using the legacy packet heuristic (96 bytes per signing pair) also yields 12.
 // In our u16 encoding scheme, 12 would be encoded as a single byte.
 // Rather than using the u16 decoding, we can simply read the byte and
 // verify that the MSB is not set.
