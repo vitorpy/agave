@@ -36,6 +36,7 @@ solana-transaction-error = { workspace = true }
 [dev-dependencies]
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
+base64 = { workspace = true }
 bincode = { workspace = true }
 criterion = { workspace = true }
 rand = { workspace = true }
@@ -48,7 +49,8 @@ solana-runtime-transaction = { path = ".", features = ["agave-unstable-api"] }
 solana-signer = { workspace = true }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-system-transaction = { workspace = true }
-solana-transaction = { workspace = true, features = ["blake3", "serde"] }
+solana-transaction = { workspace = true, features = ["blake3", "serde", "verify"] }
+wincode = { workspace = true }
 solana-vote-interface = { workspace = true, features = ["bincode"] }
 
 [[bench]]

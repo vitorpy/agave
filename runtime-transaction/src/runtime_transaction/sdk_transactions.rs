@@ -189,6 +189,7 @@ mod tests {
         solana_system_interface::instruction as system_instruction,
         solana_transaction::{Transaction, versioned::VersionedTransaction},
         solana_vote_interface::{self as vote, state::Vote},
+        std::collections::HashSet,
     };
 
     fn vote_sanitized_versioned_transaction() -> SanitizedVersionedTransaction {
@@ -420,5 +421,56 @@ mod tests {
             result.err(),
             Some(solana_transaction_error::TransactionError::SanitizeFailure)
         );
+    }
+
+    #[test]
+    fn v1_sanitized_verify_matches_versioned_after_wincode_roundtrip() {
+        use solana_message::v1;
+        use solana_transaction::sanitized::{MessageHash, SanitizedTransaction};
+
+        let payer = Keypair::new();
+        let to = Keypair::new();
+        let blockhash = Hash::new_unique();
+        let ix = system_instruction::transfer(&payer.pubkey(), &to.pubkey(), 1);
+        let msg = v1::Message::try_compile(&payer.pubkey(), &[ix], blockhash).unwrap();
+        let vtx =
+            VersionedTransaction::try_new(VersionedMessage::V1(msg), &[&payer]).unwrap();
+        let wire = wincode::serialize(&vtx).unwrap();
+        let vtx: VersionedTransaction = wincode::deserialize(&wire).unwrap();
+        let sanitized = SanitizedTransaction::try_create(
+            vtx,
+            MessageHash::Compute,
+            None,
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .unwrap();
+        sanitized.verify().unwrap();
+    }
+
+    /// Regression: exact wincode wire that failed RPC `simulateTransaction` preflight (sigVerify).
+    #[test]
+    fn v1_integration_fixture_wire_sanitized_verify() {
+        use base64::Engine;
+        use solana_transaction::sanitized::{MessageHash, SanitizedTransaction};
+
+        const B64: &str = "gQEAAQAAAAAjn/SQQ+G1THFErVoPMZYZ6upzRYzllBv7d/zRsabF5QEDMYKIjoRQSgOwdr+n04uDYCAc69qw9BYCJtJnDVzAT3MPwTEmFXrmIbdfA6IYAAEwh1GEH8ZTi8CYTxD2LzdjzwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIMAAABAgAAAAEAAAAAAAAAAOLKVNo4ispRbCec9vi7nI1iOWFDgBi1QvIxoR4gem0XfOsiwo7LFqhDxwOv2XNcMy0EqPTmzb3pzF9esyYuAQ==";
+        let wire = base64::engine::general_purpose::STANDARD
+            .decode(B64)
+            .expect("valid base64");
+        let vtx: VersionedTransaction = wincode::deserialize(&wire).expect("wincode tx");
+        assert!(
+            vtx.verify_with_results().iter().all(|r| *r),
+            "versioned verify should accept fixture wire"
+        );
+        let sanitized = SanitizedTransaction::try_create(
+            vtx,
+            MessageHash::Compute,
+            None,
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .expect("sanitize");
+        sanitized.verify().expect("sanitized verify should match versioned");
     }
 }
