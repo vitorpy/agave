@@ -135,6 +135,7 @@ members = [
 exclude = [
     "ci/xtask",
     "dev-bins",
+    "patch-crates/solana-transaction",
     "platform-tools-sdk",
     "programs/sbf",
     "svm/tests/example-programs",
@@ -624,3 +625,5 @@ codegen-units = 1
 [patch.crates-io]
 # for details, see https://github.com/anza-xyz/crossbeam/commit/fd279d707025f0e60951e429bf778b4813d1b6bf
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
+# v1 SanitizedTransaction::verify payload matches VersionedTransaction signing (V1_PREFIX + body); vendored crates.io 4.0.0 + fix.
+solana-transaction = { path = "patch-crates/solana-transaction" }

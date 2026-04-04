@@ -10109,6 +10109,7 @@ dependencies = [
  "agave-feature-set",
  "agave-reserved-account-keys",
  "agave-transaction-view",
+ "base64 0.22.1",
  "bincode",
  "criterion",
  "rand 0.9.2",
@@ -10130,6 +10131,7 @@ dependencies = [
  "solana-transaction-context",
  "solana-transaction-error",
  "solana-vote-interface",
+ "wincode",
 ]
 
 [[package]]
@@ -11094,8 +11096,6 @@ dependencies = [
 [[package]]
 name = "solana-transaction"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dc0d18f4f109cc1777459271800755705ca6d1aba319934611e1d4f6bb162b5"
 dependencies = [
  "serde",
  "serde_derive",
