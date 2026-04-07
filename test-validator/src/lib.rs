@@ -1362,13 +1362,100 @@ impl Drop for TestValidator {
 
 #[cfg(test)]
 mod test {
-    use {super::*, solana_feature_gate_interface::Feature};
+    use {
+        super::*,
+        serde_json::Value,
+        solana_feature_gate_interface::Feature,
+        std::process::{Command, Output},
+        tempfile::TempDir,
+    };
+
+    fn standalone_consumer_manifest(temp_dir: &TempDir) -> PathBuf {
+        let manifest_path = temp_dir.path().join("Cargo.toml");
+        fs::create_dir_all(temp_dir.path().join("src")).unwrap();
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"[package]
+name = "solana-test-validator-wincode-regression"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+solana-test-validator = {{ path = "{}" }}
+"#,
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        )
+        .unwrap();
+        fs::write(temp_dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        manifest_path
+    }
+
+    fn run_standalone_consumer_cargo(
+        manifest_path: &Path,
+        target_dir: &Path,
+        args: &[&str],
+    ) -> Output {
+        Command::new("cargo")
+            .args(args)
+            .arg("--manifest-path")
+            .arg(manifest_path)
+            .env("CARGO_NET_OFFLINE", "true")
+            .env("CARGO_TARGET_DIR", target_dir)
+            .output()
+            .unwrap()
+    }
+
+    fn assert_cargo_success(context: &str, output: &Output) {
+        assert!(
+            output.status.success(),
+            "{context} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 
     #[test]
     fn get_health() {
         let (test_validator, _payer) = TestValidatorGenesis::default().start();
         let rpc_client = test_validator.get_rpc_client();
         rpc_client.get_health().expect("health");
+    }
+
+    #[test]
+    fn standalone_consumer_avoids_mixed_wincode_graph() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manifest_path = standalone_consumer_manifest(&temp_dir);
+        let target_dir = temp_dir.path().join("target");
+
+        let metadata = run_standalone_consumer_cargo(
+            &manifest_path,
+            &target_dir,
+            &["metadata", "--offline", "--format-version", "1"],
+        );
+        assert_cargo_success("cargo metadata", &metadata);
+
+        let metadata: Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let mut versions = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|package| {
+                (package["name"].as_str() == Some("wincode"))
+                    .then(|| package["version"].as_str().unwrap().to_string())
+            })
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions.dedup();
+        assert_eq!(versions, vec!["0.4.9"]);
+
+        let check = run_standalone_consumer_cargo(
+            &manifest_path,
+            &target_dir,
+            &["check", "--offline", "--quiet"],
+        );
+        assert_cargo_success("cargo check", &check);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

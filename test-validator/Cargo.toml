@@ -64,4 +64,5 @@ solana-validator-exit = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 solana-sdk-ids = { workspace = true }
