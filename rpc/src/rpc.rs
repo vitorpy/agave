@@ -6485,6 +6485,31 @@ pub mod tests {
     }
 
     #[test]
+    fn test_rpc_simulate_transaction_fixture_v1_wire_does_not_fail_sigverify() {
+        const B64: &str = "gQEAAQAAAAAjn/SQQ+G1THFErVoPMZYZ6upzRYzllBv7d/zRsabF5QEDMYKIjoRQSgOwdr+n04uDYCAc69qw9BYCJtJnDVzAT3MPwTEmFXrmIbdfA6IYAAEwh1GEH8ZTi8CYTxD2LzdjzwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIMAAABAgAAAAEAAAAAAAAAAOLKVNo4ispRbCec9vi7nI1iOWFDgBi1QvIxoR4gem0XfOsiwo7LFqhDxwOv2XNcMy0EqPTmzb3pzF9esyYuAQ==";
+
+        let rpc = RpcHandler::start();
+        let bank = rpc.working_bank();
+        bank.freeze();
+
+        let request = create_test_request(
+            "simulateTransaction",
+            Some(json!([
+                B64,
+                {
+                    "encoding": "base64",
+                    "sigVerify": true,
+                }
+            ])),
+        );
+        let response = serde_json::to_string(&rpc.handle_request_sync(request)).unwrap();
+        assert!(
+            !response.contains("SignatureFailure"),
+            "fixture v1 wire should not fail RPC sigverify: {response}"
+        );
+    }
+
+    #[test]
     fn test_rpc_simulate_transaction_with_parsing_token_accounts() {
         let rpc = RpcHandler::start();
         let bank = rpc.working_bank();
@@ -7198,6 +7223,115 @@ pub mod tests {
                 r#"{{"jsonrpc":"2.0","result":"{}","id":1}}"#,
                 v1_transaction.signatures[0]
             )),
+        );
+    }
+
+    #[test]
+    fn test_rpc_send_transaction_preflight_v1_with_config() {
+        let exit = Arc::new(AtomicBool::new(false));
+        let validator_exit = create_validator_exit(exit.clone());
+        let ledger_path = get_tmp_ledger_path!();
+        let blockstore = Arc::new(Blockstore::open(&ledger_path).unwrap());
+        let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::default()));
+        let (bank_forks, mint_keypair, ..) = new_bank_forks();
+        let optimistically_confirmed_bank =
+            OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
+        let health = RpcHealth::stub(optimistically_confirmed_bank.clone(), blockstore.clone());
+        health.stub_set_health_status(Some(RpcHealthStatus::Ok));
+
+        // Freeze bank 0 to prevent a panic in `run_transaction_simulation()`
+        bank_forks.write().unwrap().get(0).unwrap().freeze();
+
+        let mut io = MetaIoHandler::default();
+        io.extend_with(rpc_full::FullImpl.to_delegate());
+        let cluster_info = Arc::new({
+            let keypair = Arc::new(Keypair::new());
+            let contact_info = ContactInfo::new_with_socketaddr(
+                &keypair.pubkey(),
+                &socketaddr!(Ipv4Addr::LOCALHOST, 1234),
+            );
+            ClusterInfo::new(contact_info, keypair, SocketAddrSpace::Unspecified)
+        });
+        let my_tpu_address = cluster_info.my_contact_info().tpu(Protocol::QUIC).unwrap();
+        let config = JsonRpcConfig::default();
+        let JsonRpcConfig {
+            rpc_threads,
+            rpc_blocking_threads,
+            rpc_niceness_adj,
+            ..
+        } = config;
+        let runtime = service_runtime(rpc_threads, rpc_blocking_threads, rpc_niceness_adj);
+        let (meta, receiver) = JsonRpcRequestProcessor::new(
+            config,
+            None,
+            bank_forks.clone(),
+            block_commitment_cache,
+            blockstore,
+            validator_exit,
+            health.clone(),
+            cluster_info,
+            Hash::default(),
+            None,
+            optimistically_confirmed_bank,
+            Arc::new(RwLock::new(LargestAccountsCache::new(30))),
+            Arc::new(MaxSlots::default()),
+            Arc::new(LeaderScheduleCache::default()),
+            Arc::new(AtomicU64::default()),
+            Some(Arc::new(PrioritizationFeeCache::default())),
+            runtime.clone(),
+        );
+
+        let client = create_client_for_tests(runtime.handle().clone(), my_tpu_address, None, 1);
+        SendTransactionService::new(
+            &bank_forks,
+            receiver,
+            client,
+            SendTransactionServiceConfig {
+                retry_rate_ms: 1_000,
+                leader_forward_count: 1,
+                ..SendTransactionServiceConfig::default()
+            },
+            exit.clone(),
+        );
+
+        let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+        let recipient = solana_pubkey::new_rand();
+        let instruction = system_instruction::transfer(
+            &mint_keypair.pubkey(),
+            &recipient,
+            TEST_TRANSFER_LAMPORTS,
+        );
+        let config = solana_message::v1::TransactionConfig::empty()
+            .with_compute_unit_limit(6_000_000)
+            .with_heap_size(256 * 1024);
+        let message = solana_message::v1::Message::try_compile_with_config(
+            &mint_keypair.pubkey(),
+            &[instruction],
+            recent_blockhash,
+            config,
+        )
+        .unwrap();
+        let transaction =
+            VersionedTransaction::try_new(VersionedMessage::V1(message), &[&mint_keypair]).unwrap();
+
+        assert!(
+            transaction.verify_with_results().iter().all(|r| *r),
+            "local v1+config tx should verify before RPC submit"
+        );
+
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}", {{"encoding":"base64"}}]}}"#,
+            BASE64_STANDARD.encode(wincode::serialize(&transaction).unwrap())
+        );
+        let res = io.handle_request_sync(&req, meta);
+        assert_eq!(
+            res.is_some(),
+            true,
+            "RPC should return a response for locally valid v1+config tx"
+        );
+        assert!(
+            !res.unwrap().contains("SignatureFailure"),
+            "RPC should not reject locally-valid v1+config tx with SignatureFailure"
         );
     }
 

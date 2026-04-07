@@ -433,8 +433,7 @@ mod tests {
         let blockhash = Hash::new_unique();
         let ix = system_instruction::transfer(&payer.pubkey(), &to.pubkey(), 1);
         let msg = v1::Message::try_compile(&payer.pubkey(), &[ix], blockhash).unwrap();
-        let vtx =
-            VersionedTransaction::try_new(VersionedMessage::V1(msg), &[&payer]).unwrap();
+        let vtx = VersionedTransaction::try_new(VersionedMessage::V1(msg), &[&payer]).unwrap();
         let wire = wincode::serialize(&vtx).unwrap();
         let vtx: VersionedTransaction = wincode::deserialize(&wire).unwrap();
         let sanitized = SanitizedTransaction::try_create(
@@ -471,6 +470,45 @@ mod tests {
             &HashSet::new(),
         )
         .expect("sanitize");
-        sanitized.verify().expect("sanitized verify should match versioned");
+        sanitized
+            .verify()
+            .expect("sanitized verify should match versioned");
+    }
+
+    #[test]
+    fn v1_with_config_wire_sanitized_verify() {
+        use solana_message::v1;
+        use solana_transaction::sanitized::{MessageHash, SanitizedTransaction};
+
+        let payer = Keypair::new();
+        let to = Keypair::new();
+        let blockhash = Hash::new_unique();
+        let ix = system_instruction::transfer(&payer.pubkey(), &to.pubkey(), 1);
+        let config = v1::TransactionConfig::empty()
+            .with_compute_unit_limit(6_000_000)
+            .with_heap_size(256 * 1024);
+        let msg = v1::Message::try_compile_with_config(&payer.pubkey(), &[ix], blockhash, config)
+            .unwrap();
+        let vtx = VersionedTransaction::try_new(VersionedMessage::V1(msg), &[&payer]).unwrap();
+
+        assert!(
+            vtx.verify_with_results().iter().all(|r| *r),
+            "versioned verify should accept v1+config tx"
+        );
+
+        let wire = wincode::serialize(&vtx).unwrap();
+        let vtx: VersionedTransaction = wincode::deserialize(&wire).unwrap();
+        let sanitized = SanitizedTransaction::try_create(
+            vtx,
+            MessageHash::Compute,
+            None,
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        sanitized
+            .verify()
+            .expect("sanitized verify should match versioned for v1+config");
     }
 }
