@@ -17,6 +17,7 @@ use {
         nonblocking::{self, rpc_client::get_rpc_request_str},
         rpc_sender::*,
     },
+    bincode::serialize,
     serde::Serialize,
     serde_json::Value,
     solana_account::{Account, ReadableAccount},
@@ -28,7 +29,7 @@ use {
     solana_epoch_schedule::EpochSchedule,
     solana_feature_gate_interface::Feature,
     solana_hash::Hash,
-    solana_message::{Message as LegacyMessage, v0},
+    solana_message::{Message as LegacyMessage, VersionedMessage, v0, v1},
     solana_pubkey::Pubkey,
     solana_rpc_client_api::{
         client_error::{Error as ClientError, ErrorKind, Result as ClientResult},
@@ -76,10 +77,23 @@ impl SerializableMessage for v0::Message {
         self.serialize()
     }
 }
+impl SerializableMessage for v1::Message {
+    fn serialize(&self) -> Vec<u8> {
+        VersionedMessage::V1(self.clone()).serialize()
+    }
+}
+impl SerializableMessage for VersionedMessage {
+    fn serialize(&self) -> Vec<u8> {
+        self.serialize()
+    }
+}
 
 /// Trait used to add support for versioned transactions to RPC APIs while
 /// retaining backwards compatibility
 pub trait SerializableTransaction: Serialize {
+    fn serialize_for_rpc(&self) -> ClientResult<Vec<u8>> {
+        serialize(self).map_err(|e| ErrorKind::Custom(format!("Serialization failed: {e}")).into())
+    }
     fn get_signature(&self) -> &Signature;
     fn get_recent_blockhash(&self) -> &Hash;
     fn uses_durable_nonce(&self) -> bool;
@@ -96,6 +110,10 @@ impl SerializableTransaction for Transaction {
     }
 }
 impl SerializableTransaction for VersionedTransaction {
+    fn serialize_for_rpc(&self) -> ClientResult<Vec<u8>> {
+        wincode::serialize(self)
+            .map_err(|e| ErrorKind::Custom(format!("Serialization failed: {e}")).into())
+    }
     fn get_signature(&self) -> &Signature {
         &self.signatures[0]
     }
@@ -3795,9 +3813,9 @@ mod tests {
         solana_account_decoder::{UiAccountData, encode_ui_account},
         solana_account_decoder_client_types::UiAccountEncoding,
         solana_hash::Hash,
-        solana_instruction::error::InstructionError,
+        solana_instruction::{Instruction, error::InstructionError},
         solana_keypair::Keypair,
-        solana_message::{MessageHeader, compiled_instruction::CompiledInstruction},
+        solana_message::{MessageHeader, compiled_instruction::CompiledInstruction, v1},
         solana_rpc_client_api::client_error::ErrorKind,
         solana_signer::Signer,
         solana_system_transaction as system_transaction,
@@ -4478,36 +4496,7 @@ mod tests {
         }
     }
 
-    #[test_case(LegacyMessage {
-        header: MessageHeader {
-            num_required_signatures: 1,
-            num_readonly_signed_accounts: 0,
-            num_readonly_unsigned_accounts: 1,
-        },
-        account_keys: vec![Pubkey::new_unique()],
-        recent_blockhash: Hash::new_unique(),
-        instructions: vec![CompiledInstruction {
-            program_id_index: 1,
-            accounts: vec![0],
-            data: vec![],
-        }],
-    }; "legacy message")]
-    #[test_case(v0::Message {
-            header: MessageHeader {
-                num_required_signatures: 1,
-                num_readonly_signed_accounts: 0,
-                num_readonly_unsigned_accounts: 0,
-            },
-            account_keys: vec![Pubkey::new_unique()],
-            recent_blockhash: Hash::new_unique(),
-            instructions: vec![CompiledInstruction {
-                program_id_index: 0,
-                accounts: vec![],
-                data: vec![],
-            }],
-            address_table_lookups: vec![],
-        }; "v0 message")]
-    fn test_get_fee_for_message_sends_properly_serialized_v0_transaction<M>(message: M)
+    fn assert_get_fee_for_message_serializes_message<M>(message: M)
     where
         M: SerializableMessage,
     {
@@ -4557,5 +4546,52 @@ mod tests {
 
         let fee: u64 = rpc_client.get_fee_for_message(&message).unwrap();
         assert_eq!(fee, 42);
+    }
+
+    fn build_v1_fee_test_message() -> v1::Message {
+        let payer = Keypair::new();
+        let instruction = Instruction::new_with_bytes(Pubkey::new_unique(), &[], vec![]);
+        v1::Message::try_compile(&payer.pubkey(), &[instruction], Hash::default()).unwrap()
+    }
+
+    #[test_case(LegacyMessage {
+        header: MessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        },
+        account_keys: vec![Pubkey::new_unique()],
+        recent_blockhash: Hash::default(),
+        instructions: vec![CompiledInstruction {
+            program_id_index: 1,
+            accounts: vec![0],
+            data: vec![],
+        }],
+    }; "legacy message")]
+    #[test_case(v0::Message {
+            header: MessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![Pubkey::new_unique()],
+            recent_blockhash: Hash::default(),
+            instructions: vec![CompiledInstruction {
+                program_id_index: 0,
+                accounts: vec![],
+                data: vec![],
+            }],
+            address_table_lookups: vec![],
+        }; "v0 message")]
+    fn test_get_fee_for_message_sends_properly_serialized_message<M>(message: M)
+    where
+        M: SerializableMessage,
+    {
+        assert_get_fee_for_message_serializes_message(message);
+    }
+
+    #[test]
+    fn test_get_fee_for_message_sends_properly_serialized_v1_message() {
+        assert_get_fee_for_message_serializes_message(build_v1_fee_test_message());
     }
 }

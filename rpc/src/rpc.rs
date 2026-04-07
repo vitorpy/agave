@@ -119,9 +119,9 @@ use {
 use {
     bincode::Options,
     solana_gossip::contact_info::ContactInfo,
-    solana_perf::packet::PACKET_DATA_SIZE,
     solana_ledger::get_tmp_ledger_path,
     solana_net_utils::SocketAddrSpace,
+    solana_perf::packet::PACKET_DATA_SIZE,
     solana_program_runtime::solana_sbpf::program::BuiltinFunctionDefinition,
     solana_runtime::commitment::CommitmentSlots,
     solana_send_transaction_service::{
@@ -4705,6 +4705,7 @@ pub mod tests {
     const TEST_MINT_LAMPORTS: u64 = 1_000_000_000;
     const TEST_SIGNATURE_FEE: u64 = 5_000;
     const TEST_SLOTS_PER_EPOCH: u64 = 256;
+    const TEST_TRANSFER_LAMPORTS: u64 = 42;
 
     pub(crate) fn new_test_cluster_info() -> ClusterInfo {
         let keypair = Arc::new(Keypair::new());
@@ -4765,6 +4766,20 @@ pub mod tests {
         }
 
         loaded_accounts_data_size
+    }
+
+    fn build_v1_system_transfer_transaction(
+        payer: &Keypair,
+        to: &Pubkey,
+        lamports: u64,
+        blockhash: Hash,
+    ) -> VersionedTransaction {
+        let instruction = system_instruction::transfer(&payer.pubkey(), to, lamports);
+        let message =
+            solana_message::v1::Message::try_compile(&payer.pubkey(), &[instruction], blockhash)
+                .unwrap();
+        VersionedTransaction::try_new(solana_message::VersionedMessage::V1(message), &[payer])
+            .unwrap()
     }
 
     fn test_builtin_processor(
@@ -5213,7 +5228,7 @@ pub mod tests {
         let req = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["{mint_pubkey}"]}}"#
         );
-        let res = io.handle_request_sync(&req, meta);
+        let res = io.handle_request_sync(&req, meta.clone());
         let expected = json!({
             "jsonrpc": "2.0",
             "result": {
@@ -6434,6 +6449,42 @@ pub mod tests {
     }
 
     #[test]
+    fn test_rpc_simulate_transaction_accepts_canonical_v1_wire() {
+        let rpc = RpcHandler::start();
+        let bank = rpc.working_bank();
+        bank.set_sysvar_for_tests(&SlotHashes::default());
+        let rent_exempt_amount = bank.get_minimum_balance_for_rent_exemption(0);
+        let recent_blockhash = bank.confirmed_last_blockhash();
+
+        let bob_pubkey = solana_pubkey::new_rand();
+        let tx = build_v1_system_transfer_transaction(
+            &rpc.mint_keypair,
+            &bob_pubkey,
+            rent_exempt_amount,
+            recent_blockhash,
+        );
+        let tx_serialized_encoded = BASE64_STANDARD.encode(wincode::serialize(&tx).unwrap());
+
+        bank.freeze();
+
+        let request = create_test_request(
+            "simulateTransaction",
+            Some(json!([
+                tx_serialized_encoded,
+                {
+                    "encoding": "base64",
+                    "sigVerify": true,
+                }
+            ])),
+        );
+        let response: RpcResponse<RpcSimulateTransactionResult> =
+            parse_success_result(rpc.handle_request_sync(request));
+
+        assert_eq!(response.value.err, None);
+        assert!(response.value.logs.is_some());
+    }
+
+    #[test]
     fn test_rpc_simulate_transaction_with_parsing_token_accounts() {
         let rpc = RpcHandler::start();
         let bank = rpc.working_bank();
@@ -6890,7 +6941,7 @@ pub mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["{}"], {{"searchTransactionHistory": true}}]}}"#,
             confirmed_block_signatures[1]
         );
-        let res = io.handle_request_sync(&req, meta);
+        let res = io.handle_request_sync(&req, meta.clone());
         assert_eq!(
             res,
             Some(
@@ -7119,12 +7170,34 @@ pub mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
             bs58::encode(serialize(&bad_transaction).unwrap()).into_string()
         );
-        let res = io.handle_request_sync(&req, meta);
+        let res = io.handle_request_sync(&req, meta.clone());
         assert_eq!(
             res,
             Some(
                 r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"invalid transaction: Transaction failed to sanitize accounts offsets correctly"},"id":1}"#.to_string(),
             )
+        );
+
+        let v1_recipient = solana_pubkey::new_rand();
+        let v1_transaction = build_v1_system_transfer_transaction(
+            &mint_keypair,
+            &v1_recipient,
+            TEST_TRANSFER_LAMPORTS,
+            recent_blockhash,
+        );
+        let v1_transaction_wire =
+            BASE64_STANDARD.encode(wincode::serialize(&v1_transaction).unwrap());
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}", {{"encoding":"base64","skipPreflight":true}}]}}"#,
+            v1_transaction_wire
+        );
+        let res = io.handle_request_sync(&req, meta);
+        assert_eq!(
+            res,
+            Some(format!(
+                r#"{{"jsonrpc":"2.0","result":"{}","id":1}}"#,
+                v1_transaction.signatures[0]
+            )),
         );
     }
 
@@ -9460,6 +9533,27 @@ pub mod tests {
             let request = create_test_request(
                 "getFeeForMessage",
                 Some(json!([BASE64_STANDARD.encode(serialize(&v0_msg).unwrap())])),
+            );
+            let response: RpcResponse<u64> = parse_success_result(rpc.handle_request_sync(request));
+            assert_eq!(response.value, TEST_SIGNATURE_FEE);
+        }
+
+        {
+            let program_id = Pubkey::new_unique();
+            let fee_payer = Keypair::new();
+            let instruction = Instruction::new_with_bytes(program_id, &[], vec![]);
+            let v1_msg = VersionedMessage::V1(
+                solana_message::v1::Message::try_compile(
+                    &fee_payer.pubkey(),
+                    &[instruction],
+                    recent_blockhash,
+                )
+                .unwrap(),
+            );
+
+            let request = create_test_request(
+                "getFeeForMessage",
+                Some(json!([BASE64_STANDARD.encode(v1_msg.serialize())])),
             );
             let response: RpcResponse<u64> = parse_success_result(rpc.handle_request_sync(request));
             assert_eq!(response.value, TEST_SIGNATURE_FEE);

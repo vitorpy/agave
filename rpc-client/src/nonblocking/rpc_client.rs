@@ -20,7 +20,6 @@ use {
         rpc_sender::*,
     },
     base64::{Engine, prelude::BASE64_STANDARD},
-    bincode::serialize,
     futures::join,
     log::*,
     serde_json::{Value, json},
@@ -4724,12 +4723,11 @@ impl RpcClient {
     }
 }
 
-fn serialize_and_encode<T>(input: &T, encoding: UiTransactionEncoding) -> ClientResult<String>
-where
-    T: serde::ser::Serialize,
-{
-    let serialized = serialize(input)
-        .map_err(|e| ClientErrorKind::Custom(format!("Serialization failed: {e}")))?;
+fn serialize_and_encode(
+    input: &impl SerializableTransaction,
+    encoding: UiTransactionEncoding,
+) -> ClientResult<String> {
+    let serialized = input.serialize_for_rpc()?;
     let encoded = match encoding {
         UiTransactionEncoding::Base58 => bs58::encode(serialized).into_string(),
         UiTransactionEncoding::Base64 => BASE64_STANDARD.encode(serialized),
@@ -4792,7 +4790,69 @@ pub fn create_rpc_client_mocks() -> crate::mock_sender::Mocks {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        async_trait::async_trait,
+        serde_json::Value,
+        solana_instruction::Instruction,
+        solana_keypair::Keypair,
+        solana_message::{VersionedMessage, v1},
+        solana_signer::Signer,
+        solana_system_transaction as system_transaction,
+        solana_transaction::versioned::VersionedTransaction,
+        std::sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone)]
+    struct CaptureSender {
+        captured_requests: Arc<Mutex<Vec<(RpcRequest, Value)>>>,
+        response: Value,
+    }
+
+    impl CaptureSender {
+        fn new(response: Value) -> (Self, Arc<Mutex<Vec<(RpcRequest, Value)>>>) {
+            let captured_requests = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    captured_requests: Arc::clone(&captured_requests),
+                    response,
+                },
+                captured_requests,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl RpcSender for CaptureSender {
+        async fn send(
+            &self,
+            request: RpcRequest,
+            params: Value,
+        ) -> solana_rpc_client_api::client_error::Result<Value> {
+            self.captured_requests
+                .lock()
+                .unwrap()
+                .push((request, params));
+            Ok(self.response.clone())
+        }
+
+        fn get_transport_stats(&self) -> RpcTransportStats {
+            RpcTransportStats::default()
+        }
+
+        fn url(&self) -> String {
+            "capture".to_string()
+        }
+    }
+
+    fn build_v1_transfer_transaction() -> VersionedTransaction {
+        let payer = Keypair::new();
+        let instruction: Instruction =
+            Instruction::new_with_bytes(Pubkey::new_unique(), &[], Vec::new());
+        let message =
+            v1::Message::try_compile(&payer.pubkey(), &[instruction], Hash::default()).unwrap();
+        VersionedTransaction::try_new(VersionedMessage::V1(message), &[&payer]).unwrap()
+    }
 
     #[tokio::test]
     async fn test_get_token_accounts_by_delegate_uses_correct_rpc_method() {
@@ -4827,5 +4887,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&resp.value, &[keyed_account]);
+    }
+
+    #[tokio::test]
+    async fn test_send_transaction_with_config_serializes_v1_with_wincode() {
+        let transaction = build_v1_transfer_transaction();
+        let expected = BASE64_STANDARD.encode(wincode::serialize(&transaction).unwrap());
+        let (sender, captured_requests) =
+            CaptureSender::new(Value::String(transaction.signatures[0].to_string()));
+        let client = RpcClient::new_sender(sender, RpcClientConfig::default());
+
+        let signature = client
+            .send_transaction_with_config(&transaction, RpcSendTransactionConfig::default())
+            .await
+            .unwrap();
+
+        assert_eq!(signature, transaction.signatures[0]);
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let (request, params) = &captured_requests[0];
+        assert_eq!(*request, RpcRequest::SendTransaction);
+        assert_eq!(params[0].as_str().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_transaction_with_config_serializes_v1_with_wincode() {
+        let transaction = build_v1_transfer_transaction();
+        let expected = BASE64_STANDARD.encode(wincode::serialize(&transaction).unwrap());
+        let response = serde_json::to_value(Response {
+            context: RpcResponseContext {
+                slot: 1,
+                api_version: None,
+            },
+            value: RpcSimulateTransactionResult {
+                err: None,
+                logs: None,
+                accounts: None,
+                units_consumed: None,
+                loaded_accounts_data_size: None,
+                return_data: None,
+                inner_instructions: None,
+                replacement_blockhash: None,
+                fee: None,
+                pre_balances: None,
+                post_balances: None,
+                pre_token_balances: None,
+                post_token_balances: None,
+                loaded_addresses: None,
+            },
+        })
+        .unwrap();
+        let (sender, captured_requests) = CaptureSender::new(response);
+        let client = RpcClient::new_sender(sender, RpcClientConfig::default());
+
+        client
+            .simulate_transaction_with_config(
+                &transaction,
+                RpcSimulateTransactionConfig {
+                    sig_verify: true,
+                    ..RpcSimulateTransactionConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let (request, params) = &captured_requests[0];
+        assert_eq!(*request, RpcRequest::SimulateTransaction);
+        assert_eq!(params[0].as_str().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_send_transaction_with_config_keeps_legacy_bincode_wire() {
+        let payer = Keypair::new();
+        let recipient = solana_pubkey::new_rand();
+        let transaction = system_transaction::transfer(&payer, &recipient, 1, Hash::default());
+        let expected = BASE64_STANDARD.encode(bincode::serialize(&transaction).unwrap());
+        let (sender, captured_requests) =
+            CaptureSender::new(Value::String(transaction.signatures[0].to_string()));
+        let client = RpcClient::new_sender(sender, RpcClientConfig::default());
+
+        let signature = client
+            .send_transaction_with_config(&transaction, RpcSendTransactionConfig::default())
+            .await
+            .unwrap();
+
+        assert_eq!(signature, transaction.signatures[0]);
+
+        let captured_requests = captured_requests.lock().unwrap();
+        assert_eq!(captured_requests.len(), 1);
+        let (request, params) = &captured_requests[0];
+        assert_eq!(*request, RpcRequest::SendTransaction);
+        assert_eq!(params[0].as_str().unwrap(), expected);
     }
 }
