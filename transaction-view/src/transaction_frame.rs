@@ -70,14 +70,16 @@ impl TransactionFrame {
             }
 
             let message_header = MessageHeaderFrame {
-                offset: u16::try_from(message_start).map_err(|_| TransactionViewError::ParseError)?,
+                offset: u16::try_from(message_start)
+                    .map_err(|_| TransactionViewError::ParseError)?,
                 version: TransactionVersion::V1,
                 num_required_signatures: v1_msg.header.num_required_signatures,
                 num_readonly_signed_accounts: v1_msg.header.num_readonly_signed_accounts,
                 num_readonly_unsigned_accounts: v1_msg.header.num_readonly_unsigned_accounts,
             };
 
-            let static_account_keys = StaticAccountKeysFrame::v1_placeholder(v1_msg.account_keys.len())?;
+            let static_account_keys =
+                StaticAccountKeysFrame::v1_placeholder(v1_msg.account_keys.len())?;
             let instructions = InstructionsFrame::v1_placeholder(v1_msg.instructions.len())?;
             let address_table_lookup = AddressTableLookupFrame {
                 num_address_table_lookups: 0,
@@ -542,8 +544,9 @@ mod tests {
 
     #[test]
     fn test_rejects_buffer_larger_than_v1_wire_limit() {
-        assert!(TransactionFrame::try_new(&vec![0u8; crate::limits::MAX_TRANSACTION_SIZE + 1])
-            .is_err());
+        assert!(
+            TransactionFrame::try_new(&vec![0u8; crate::limits::MAX_TRANSACTION_SIZE + 1]).is_err()
+        );
     }
 
     #[test]

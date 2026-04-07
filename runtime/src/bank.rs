@@ -123,8 +123,7 @@ use {
     solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{measure::Measure, measure_time, measure_us},
     solana_message::{
-        self, AccountKeys, SanitizedMessage, VersionedMessage,
-        inner_instruction::InnerInstructions,
+        self, AccountKeys, SanitizedMessage, VersionedMessage, inner_instruction::InnerInstructions,
     },
     solana_packet::PACKET_DATA_SIZE,
     solana_precompile_error::PrecompileError,

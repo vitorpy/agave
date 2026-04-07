@@ -1,13 +1,9 @@
 use {
     crate::{
         address_table_lookup_frame::AddressTableLookupIterator,
-        instruction_iterator::UnifiedInstructionsIter,
-        result::Result,
-        sanitize::sanitize,
-        transaction_config_frame::TransactionConfigView,
-        transaction_data::TransactionData,
-        transaction_frame::TransactionFrame,
-        transaction_version::TransactionVersion,
+        instruction_iterator::UnifiedInstructionsIter, result::Result, sanitize::sanitize,
+        transaction_config_frame::TransactionConfigView, transaction_data::TransactionData,
+        transaction_frame::TransactionFrame, transaction_version::TransactionVersion,
     },
     core::fmt::{Debug, Formatter},
     solana_hash::Hash,
@@ -182,7 +178,10 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
     #[inline]
     pub fn instructions_iter(&self) -> UnifiedInstructionsIter<'_> {
         if let Some(msg) = self.v1_message.as_ref() {
-            return UnifiedInstructionsIter::V1 { message: msg, index: 0 };
+            return UnifiedInstructionsIter::V1 {
+                message: msg,
+                index: 0,
+            };
         }
         let data = self.data();
         // SAFETY: `frame` was created from `data`.

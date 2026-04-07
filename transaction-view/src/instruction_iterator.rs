@@ -53,7 +53,10 @@ impl Debug for UnifiedInstructionsIter<'_> {
             Self::Wire(iter) => f.debug_tuple("Wire").field(iter).finish(),
             Self::V1 { message, index } => f
                 .debug_struct("V1")
-                .field("remaining", &(message.instructions.len().saturating_sub(*index)))
+                .field(
+                    "remaining",
+                    &(message.instructions.len().saturating_sub(*index)),
+                )
                 .finish(),
         }
     }

@@ -28,7 +28,8 @@ impl StaticAccountKeysFrame {
     /// Placeholder frame for tx-v1: account keys live in the decoded [`solana_message::v1::Message`].
     #[inline(always)]
     pub(crate) fn v1_placeholder(num_accounts: usize) -> Result<Self> {
-        let num_static_accounts = u8::try_from(num_accounts).map_err(|_| TransactionViewError::ParseError)?;
+        let num_static_accounts =
+            u8::try_from(num_accounts).map_err(|_| TransactionViewError::ParseError)?;
         if num_static_accounts == 0 || num_static_accounts > MAX_ADDRESSES {
             return Err(TransactionViewError::ParseError);
         }
