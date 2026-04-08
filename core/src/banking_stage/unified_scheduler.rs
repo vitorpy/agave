@@ -103,8 +103,8 @@ pub(crate) fn ensure_banking_stage_setup(
                 // over-provision nevertheless some of packets could be invalid.
                 let task_id_base = helper.generate_task_ids(batch.len());
                 let tasks = batch.iter().enumerate().filter_map(|(i, packet)| {
-                    // Deserialize & sanitize.
-                    let tx: VersionedTransaction = packet.deserialize_slice(..).ok()?;
+                    // RPC/TPU transactions are forwarded as wincode wire bytes.
+                    let tx: VersionedTransaction = wincode::deserialize(packet.data(..)?).ok()?;
                     let tx = SanitizedVersionedTransaction::try_from(tx).ok()?;
 
                     // Resolve to runtime transaction.

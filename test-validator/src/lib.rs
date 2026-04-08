@@ -1364,8 +1364,13 @@ impl Drop for TestValidator {
 mod test {
     use {
         super::*,
-        serde_json::Value,
+        serde_json::{Value, json},
         solana_feature_gate_interface::Feature,
+        solana_hash::Hash,
+        solana_message::{VersionedMessage, v1},
+        solana_rpc_client_api::request::RpcRequest,
+        solana_system_interface::instruction as system_instruction,
+        solana_transaction::versioned::VersionedTransaction,
         std::process::{Command, Output},
         tempfile::TempDir,
     };
@@ -1416,11 +1421,94 @@ solana-test-validator = {{ path = "{}" }}
         );
     }
 
+    fn build_v1_system_transfer_transaction(
+        payer: &Keypair,
+        recipient: Pubkey,
+        lamports: u64,
+        blockhash: Hash,
+    ) -> VersionedTransaction {
+        let instruction = system_instruction::transfer(&payer.pubkey(), &recipient, lamports);
+        let config = v1::TransactionConfig::empty()
+            .with_compute_unit_limit(6_000_000)
+            .with_heap_size(256 * 1024);
+        let message = v1::Message::try_compile_with_config(
+            &payer.pubkey(),
+            &[instruction],
+            blockhash,
+            config,
+        )
+        .unwrap();
+
+        VersionedTransaction::try_new(VersionedMessage::V1(message), &[payer]).unwrap()
+    }
+
+    fn wait_for_versioned_transaction_confirmation(
+        rpc_client: &RpcClient,
+        transaction: &VersionedTransaction,
+    ) {
+        for _ in 0..60 {
+            match rpc_client
+                .get_signature_status_with_commitment(
+                    &transaction.signatures[0],
+                    CommitmentConfig::processed(),
+                )
+                .unwrap()
+            {
+                Some(Ok(())) => return,
+                Some(Err(err)) => panic!("v1 system transfer failed after submit: {err:?}"),
+                None => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+
+        let confirmed = rpc_client
+            .confirm_transaction_with_commitment(
+                &transaction.signatures[0],
+                CommitmentConfig::processed(),
+            )
+            .unwrap();
+        panic!("timed out waiting for v1 system transfer confirmation: processed={confirmed:?}");
+    }
+
     #[test]
     fn get_health() {
         let (test_validator, _payer) = TestValidatorGenesis::default().start();
         let rpc_client = test_validator.get_rpc_client();
         rpc_client.get_health().expect("health");
+    }
+
+    #[test]
+    fn v1_system_transfer_with_transaction_config_lands_via_raw_rpc_submit() {
+        let recipient = Pubkey::new_unique();
+        let (test_validator, payer) = TestValidatorGenesis::default().start();
+        let rpc_client = test_validator.get_rpc_client();
+        let blockhash = rpc_client.get_latest_blockhash().unwrap();
+        let transaction =
+            build_v1_system_transfer_transaction(&payer, recipient, 1_000_000, blockhash);
+
+        assert!(
+            transaction
+                .verify_with_results()
+                .iter()
+                .all(|verified| *verified),
+            "freshly built v1 transfer should verify locally",
+        );
+
+        let wire = wincode::serialize(&transaction).unwrap();
+        let returned_signature: String = rpc_client
+            .send(
+                RpcRequest::SendTransaction,
+                json!([
+                    BASE64_STANDARD.encode(&wire),
+                    {
+                        "encoding": "base64",
+                        "preflightCommitment": "processed"
+                    }
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(returned_signature, transaction.signatures[0].to_string());
+        wait_for_versioned_transaction_confirmation(&rpc_client, &transaction);
     }
 
     #[test]

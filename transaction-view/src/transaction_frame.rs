@@ -1,7 +1,7 @@
 use {
     crate::{
         address_table_lookup_frame::{AddressTableLookupFrame, AddressTableLookupIterator},
-        bytes::{advance_offset_for_type, read_byte},
+        bytes::advance_offset_for_type,
         instructions_frame::{InstructionsFrame, InstructionsIterator},
         limits::{MAX_LEGACY_OR_V0_TRANSACTION_SIZE, MAX_TRANSACTION_SIZE},
         message_header_frame::MessageHeaderFrame,
@@ -23,6 +23,8 @@ pub(crate) struct TransactionFrame {
     signature: SignatureFrame,
     /// Message header framing data.
     message_header: MessageHeaderFrame,
+    /// Serialized message length in bytes.
+    message_len: u16,
     /// Static account keys framing data.
     static_account_keys: StaticAccountKeysFrame,
     /// Recent blockhash offset.
@@ -45,38 +47,47 @@ impl TransactionFrame {
             return Err(TransactionViewError::ParseError);
         }
 
-        let mut offset = 0;
-        let signature = SignatureFrame::try_new(bytes, &mut offset)?;
-
-        let message_start = offset;
-        let message_prefix = read_byte(bytes, &mut offset)?;
+        let message_prefix = *bytes.first().ok_or(TransactionViewError::ParseError)?;
 
         let (
+            signature,
             message_header,
+            message_len,
             static_account_keys,
             recent_blockhash_offset,
             instructions,
             address_table_lookup,
             v1_message,
         ) = if message_prefix == v1::V1_PREFIX {
-            let body_start = offset;
-            let (v1_msg, consumed) = v1::deserialize(&bytes[body_start..])
-                .map_err(|_| TransactionViewError::ParseError)?;
-            let Some(end) = body_start.checked_add(consumed) else {
-                return Err(TransactionViewError::ParseError);
-            };
-            if end != bytes.len() {
+            let num_required_signatures = *bytes.get(1).ok_or(TransactionViewError::ParseError)?;
+            let expected_signatures_len = usize::from(num_required_signatures)
+                .checked_mul(core::mem::size_of::<Signature>())
+                .ok_or(TransactionViewError::ParseError)?;
+            let message_end = bytes
+                .len()
+                .checked_sub(expected_signatures_len)
+                .ok_or(TransactionViewError::ParseError)?;
+            let message_body = bytes
+                .get(1..message_end)
+                .ok_or(TransactionViewError::ParseError)?;
+            let (v1_msg, consumed) =
+                v1::deserialize(message_body).map_err(|_| TransactionViewError::ParseError)?;
+            if message_end != consumed.saturating_add(1)
+                || v1_msg.header.num_required_signatures != num_required_signatures
+            {
                 return Err(TransactionViewError::ParseError);
             }
+            let signature = SignatureFrame::try_new_v1(num_required_signatures, message_end)?;
 
             let message_header = MessageHeaderFrame {
-                offset: u16::try_from(message_start)
-                    .map_err(|_| TransactionViewError::ParseError)?,
+                offset: 0,
                 version: TransactionVersion::V1,
                 num_required_signatures: v1_msg.header.num_required_signatures,
                 num_readonly_signed_accounts: v1_msg.header.num_readonly_signed_accounts,
                 num_readonly_unsigned_accounts: v1_msg.header.num_readonly_unsigned_accounts,
             };
+            let message_len =
+                u16::try_from(message_end).map_err(|_| TransactionViewError::ParseError)?;
 
             let static_account_keys =
                 StaticAccountKeysFrame::v1_placeholder(v1_msg.account_keys.len())?;
@@ -89,7 +100,9 @@ impl TransactionFrame {
             };
 
             (
+                signature,
                 message_header,
+                message_len,
                 static_account_keys,
                 0u16,
                 instructions,
@@ -97,7 +110,10 @@ impl TransactionFrame {
                 Some(v1_msg),
             )
         } else {
-            offset = message_start;
+            let mut offset = 0;
+            let signature = SignatureFrame::try_new(bytes, &mut offset)?;
+
+            let message_start = offset;
             let message_header = MessageHeaderFrame::try_new(bytes, &mut offset)?;
             let static_account_keys = StaticAccountKeysFrame::try_new(bytes, &mut offset)?;
 
@@ -123,9 +139,20 @@ impl TransactionFrame {
             if offset != bytes.len() {
                 return Err(TransactionViewError::ParseError);
             }
+            let message_len = u16::try_from(bytes.len().wrapping_sub(message_start))
+                .map_err(|_| TransactionViewError::ParseError)?;
 
             (
-                message_header,
+                signature,
+                MessageHeaderFrame {
+                    offset: u16::try_from(message_start)
+                        .map_err(|_| TransactionViewError::ParseError)?,
+                    version: message_header.version,
+                    num_required_signatures: message_header.num_required_signatures,
+                    num_readonly_signed_accounts: message_header.num_readonly_signed_accounts,
+                    num_readonly_unsigned_accounts: message_header.num_readonly_unsigned_accounts,
+                },
+                message_len,
                 static_account_keys,
                 recent_blockhash_offset,
                 instructions,
@@ -147,6 +174,7 @@ impl TransactionFrame {
             Self {
                 signature,
                 message_header,
+                message_len,
                 static_account_keys,
                 recent_blockhash_offset,
                 instructions,
@@ -221,6 +249,12 @@ impl TransactionFrame {
     #[inline]
     pub(crate) fn message_offset(&self) -> u16 {
         self.message_header.offset
+    }
+
+    /// Return the serialized message length.
+    #[inline]
+    pub(crate) fn message_len(&self) -> u16 {
+        self.message_len
     }
 
     /// Return transaction_config_frame

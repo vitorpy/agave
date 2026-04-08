@@ -330,6 +330,7 @@ dependencies = [
  "solana-system-interface 3.1.0",
  "solana-transaction",
  "solana-transaction-context",
+ "wincode",
 ]
 
 [[package]]
@@ -10904,6 +10905,7 @@ dependencies = [
  "solana-genesis-utils",
  "solana-geyser-plugin-manager",
  "solana-gossip",
+ "solana-hash 4.2.0",
  "solana-inflation",
  "solana-instruction",
  "solana-keypair",
@@ -10926,10 +10928,12 @@ dependencies = [
  "solana-signer",
  "solana-streamer",
  "solana-syscalls",
+ "solana-system-interface 3.1.0",
  "solana-transaction",
  "solana-validator-exit",
  "tempfile",
  "tokio",
+ "wincode",
 ]
 
 [[package]]

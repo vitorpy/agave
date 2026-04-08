@@ -218,7 +218,9 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
     /// This does not include the signatures.
     #[inline]
     pub fn message_data(&self) -> &[u8] {
-        &self.data()[usize::from(self.frame.message_offset())..]
+        let start = usize::from(self.frame.message_offset());
+        let end = start.saturating_add(usize::from(self.frame.message_len()));
+        &self.data()[start..end]
     }
 
     #[inline]
@@ -399,9 +401,12 @@ impl<D: TransactionData> SVMStaticMessage for &TransactionView<true, D> {
 mod tests {
     use {
         super::*,
-        solana_message::{Message, VersionedMessage},
+        solana_hash::Hash,
+        solana_keypair::Keypair,
+        solana_message::{Message, VersionedMessage, v1},
         solana_pubkey::Pubkey,
         solana_signature::Signature,
+        solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::versioned::VersionedTransaction,
     };
@@ -458,8 +463,38 @@ mod tests {
         }
     }
 
+    fn v1_transfer_with_config() -> VersionedTransaction {
+        let payer = Keypair::new();
+        let instruction = system_instruction::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1);
+        let config = v1::TransactionConfig::empty()
+            .with_compute_unit_limit(6_000_000)
+            .with_heap_size(256 * 1024);
+        let message = v1::Message::try_compile_with_config(
+            &payer.pubkey(),
+            &[instruction],
+            Hash::default(),
+            config,
+        )
+        .unwrap();
+
+        VersionedTransaction::try_new(VersionedMessage::V1(message), &[&payer]).unwrap()
+    }
+
     #[test]
     fn test_multiple_transfers() {
         verify_transaction_view_frame(&multiple_transfers());
+    }
+
+    #[test]
+    fn test_v1_wire_layout_uses_message_then_signatures() {
+        let tx = v1_transfer_with_config();
+        let bytes = wincode::serialize(&tx).unwrap();
+        let view = TransactionView::try_new_unsanitized(bytes.as_ref()).unwrap();
+        let message_data = tx.message.serialize();
+
+        assert!(matches!(view.version(), TransactionVersion::V1));
+        assert_eq!(view.signatures(), tx.signatures.as_slice());
+        assert_eq!(view.static_account_keys(), tx.message.static_account_keys());
+        assert_eq!(view.message_data(), message_data.as_slice());
     }
 }

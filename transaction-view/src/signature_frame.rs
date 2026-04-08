@@ -48,6 +48,21 @@ impl SignatureFrame {
             offset: signature_offset,
         })
     }
+
+    /// Create a signature frame for tx-v1 wires, where signatures are written
+    /// after the serialized message body.
+    #[inline(always)]
+    pub(crate) fn try_new_v1(num_signatures: u8, signature_offset: usize) -> Result<Self> {
+        if num_signatures == 0 || num_signatures > MAX_SIGNATURES_PER_PACKET {
+            return Err(TransactionViewError::ParseError);
+        }
+
+        Ok(Self {
+            num_signatures,
+            offset: u16::try_from(signature_offset)
+                .map_err(|_| TransactionViewError::ParseError)?,
+        })
+    }
 }
 
 #[cfg(test)]
